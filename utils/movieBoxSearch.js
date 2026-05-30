@@ -9,19 +9,23 @@ const cheerio = require('cheerio');
  */
 
 // User-Agent header to avoid being blocked by the server
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36';
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 // Create axios instance for Movie Box requests
 const movieBoxClient = axios.create({
   baseURL: 'https://movie-box.co',
-  timeout: 10000,
+  timeout: 15000,
   headers: {
     'User-Agent': USER_AGENT,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Accept-Encoding': 'gzip, deflate',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
     'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1'
+    'Upgrade-Insecure-Requests': '1',
+    'DNT': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none'
   }
 });
 
@@ -46,78 +50,113 @@ async function searchMovieBox(query) {
     const searchUrl = `/web/searchResult?keyword=${searchQuery}`;
 
     console.log(`[MovieBox] Searching for: "${query}"`);
+    console.log(`[MovieBox] Request URL: ${searchUrl}`);
 
     // Step 3: Fetch the HTML page from Movie Box
     const response = await movieBoxClient.get(searchUrl);
     const html = response.data;
 
+    console.log(`[MovieBox] Response size: ${html.length} bytes`);
+    console.log(`[MovieBox] Response status: ${response.status}`);
+
     // Step 4: Parse HTML with cheerio
     const $ = cheerio.load(html);
 
-    // Step 5: Find all detail links and extract IDs
+    // Step 5: Find all detail links and extract information
     const results = [];
-    const seenIds = new Set(); // To track and remove duplicates
+    const seenSlugs = new Set(); // To track and remove duplicates
 
     // Look for links that contain /detail/ in their href
-    $('a[href*="/detail/"]').each((index, element) => {
+    let detailLinksFound = 0;
+    
+    $('a').each((index, element) => {
       try {
         const href = $(element).attr('href');
         
         if (!href) return; // Skip if no href
 
-        // Extract ID using regex: /id=(\d+)/
-        const idMatch = href.match(/id=(\d+)/);
-        
-        if (!idMatch || !idMatch[1]) {
-          return; // Skip if ID not found
+        // Check if this is a detail link
+        if (href.includes('/detail/')) {
+          detailLinksFound++;
+          
+          // Extract slug from URL: /detail/chicago-fire-etzlmHMeSZ5
+          const slugMatch = href.match(/\/detail\/([^/?]+)/);
+          
+          if (!slugMatch || !slugMatch[1]) {
+            console.log(`[MovieBox] Detail link found but no slug: ${href}`);
+            return; // Skip if slug not found
+          }
+
+          const slug = slugMatch[1];
+
+          // Skip if we've already seen this slug (deduplication)
+          if (seenSlugs.has(slug)) {
+            return;
+          }
+
+          seenSlugs.add(slug);
+
+          // Step 6: Extract metadata
+          const result = {
+            // Use slug as identifier since Movie Box doesn't expose numeric ID in HTML
+            // The slug contains a unique code (e.g., etzlmHMeSZ5)
+            id: slug,
+            slug: slug
+          };
+
+          // Try to extract title from link text and clean it
+          let linkText = $(element).text().trim();
+          if (linkText && linkText.length > 0 && linkText.length < 500) {
+            // Clean up title: remove rating numbers and "Watch now" text
+            // Example: "8.0Chicago Fire S14Watch now" -> "Chicago Fire S14"
+            linkText = linkText
+              .replace(/^\d+\.?\d*/, '')                    // Remove leading rating
+              .replace(/watch\s*now\s*$/i, '')              // Remove "watch now" at end
+              .replace(/^\s+|\s+$/g, '')                    // Trim whitespace
+              .replace(/\s{2,}/g, ' ');                      // Remove extra spaces
+            
+            if (linkText) {
+              result.title = linkText;
+            }
+          }
+
+          // Try to extract poster from nearby image
+          const posterAttr = $(element).data('poster') || 
+                             $(element).find('img').attr('src') ||
+                             $(element).find('img').attr('data-src');
+          if (posterAttr) {
+            result.poster = posterAttr;
+          }
+
+          // Build full URL for reference
+          result.url = `https://movie-box.co${href}`;
+
+          results.push(result);
+          console.log(`[MovieBox] Extracted result: Slug=${slug}, Title=${result.title || 'N/A'}`);
         }
-
-        const id = idMatch[1];
-
-        // Skip if we've already seen this ID (deduplication)
-        if (seenIds.has(id)) {
-          return;
-        }
-
-        seenIds.add(id);
-
-        // Step 6: Extract optional metadata
-        const result = {
-          id: id
-        };
-
-        // Try to extract title from link text or data attributes
-        const linkText = $(element).text().trim();
-        if (linkText && linkText.length > 0 && linkText.length < 200) {
-          result.title = linkText;
-        }
-
-        // Try to extract poster from nearby image or data attributes
-        const posterAttr = $(element).data('poster') || 
-                           $(element).find('img').attr('src') ||
-                           $(element).find('img').attr('data-src');
-        if (posterAttr) {
-          result.poster = posterAttr;
-        }
-
-        // Try to extract type from URL or data attributes
-        const typeMatch = href.match(/type=([^&]+)/);
-        if (typeMatch && typeMatch[1]) {
-          result.type = decodeURIComponent(typeMatch[1]);
-        }
-
-        results.push(result);
       } catch (err) {
         // Log but continue processing other links
         console.error(`[MovieBox] Error parsing link:`, err.message);
       }
     });
 
+    console.log(`[MovieBox] Detail links scanned: ${detailLinksFound}`);
     console.log(`[MovieBox] Found ${results.length} unique results for query: "${query}"`);
+
+    // If no results found, log debugging info
+    if (results.length === 0) {
+      console.log(`[MovieBox] No results found. Checking page structure...`);
+      const allLinks = $('a').length;
+      console.log(`[MovieBox] Total links in page: ${allLinks}`);
+    }
 
     return results;
   } catch (error) {
     console.error(`[MovieBox] Search error for query "${query}":`, error.message);
+    
+    if (error.response) {
+      console.error(`[MovieBox] Response status: ${error.response.status}`);
+    }
     
     // Return empty array on error instead of throwing
     // This ensures the API endpoint doesn't crash
