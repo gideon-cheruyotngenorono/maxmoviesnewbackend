@@ -57,8 +57,6 @@ module.exports = async (req, res) => {
       status: 200,
       success: true,
       creator: "GiftedTech",
-      query: searchQuery,
-      resultsCount: results.length,
       results: results
     });
     

@@ -40,7 +40,16 @@ async function searchMovieBox(query) {
   try {
     // Step 1: Validate input
     if (!query || typeof query !== 'string' || query.trim().length === 0) {
-      return [];
+      return {
+        pager: {
+          hasMore: false,
+          nextPage: null,
+          page: '1',
+          perPage: 24,
+          totalCount: 0
+        },
+        items: []
+      };
     }
 
     const searchQuery = encodeURIComponent(query.trim());
@@ -63,7 +72,7 @@ async function searchMovieBox(query) {
     const $ = cheerio.load(html);
 
     // Step 5: Find all detail links and extract information
-    const results = [];
+    const items = [];
     const seenSlugs = new Set(); // To track and remove duplicates
 
     // Look for links that contain /detail/ in their href
@@ -139,11 +148,31 @@ async function searchMovieBox(query) {
         });
         
         if (numericId) {
-          // For the basic search we only return numeric IDs (as strings)
-          results.push(String(numericId));
-          // Log a concise extraction message
-          let prettyTitle = link.linkText ? link.linkText.replace(/^\d+\.?\d*/, '').replace(/watch\s*now\s*$/i, '').trim() : 'N/A';
-          console.log(`[MovieBox] Extracted numeric ID=${numericId}, Title=${prettyTitle}`);
+          // Extract and clean title from link text
+          let title = link.linkText ? link.linkText.replace(/^\d+\.?\d*/, '').replace(/watch\s*now\s*$/i, '').trim() : 'Unknown';
+          
+          // Create item object matching original format
+          const item = {
+            subjectId: numericId,
+            subjectType: 1, // 1 = Movie/Series
+            title: title,
+            description: '',
+            releaseDate: '',
+            duration: 0,
+            genre: '',
+            cover: {
+              url: '',
+              width: 0,
+              height: 0
+            },
+            countryName: '',
+            imdbRatingValue: '0',
+            hasResource: true,
+            detailPath: link.slug
+          };
+          
+          items.push(item);
+          console.log(`[MovieBox] Extracted: ID=${numericId}, Title=${title}`);
         } else {
           console.log(`[MovieBox] Warning: Could not extract numeric ID from detail page: /detail/${link.slug}`);
         }
@@ -153,9 +182,19 @@ async function searchMovieBox(query) {
       }
     }
 
-    console.log(`[MovieBox] Successfully extracted ${results.length} results for query: "${query}"`);
+    console.log(`[MovieBox] Successfully extracted ${items.length} results for query: "${query}"`);
 
-    return results;
+    // Return structured response with pagination
+    return {
+      pager: {
+        hasMore: items.length >= 24,
+        nextPage: items.length >= 24 ? '2' : null,
+        page: '1',
+        perPage: 24,
+        totalCount: items.length
+      },
+      items: items
+    };
   } catch (error) {
     console.error(`[MovieBox] Search error for query "${query}":`, error.message);
     
@@ -163,11 +202,19 @@ async function searchMovieBox(query) {
       console.error(`[MovieBox] Response status: ${error.response.status}`);
     }
     
-    // Return empty array on error instead of throwing
-    // This ensures the API endpoint doesn't crash
+    // Return empty result structure on error
     if (error.response?.status === 404) {
       console.log(`[MovieBox] No results found for: "${query}"`);
-      return [];
+      return {
+        pager: {
+          hasMore: false,
+          nextPage: null,
+          page: '1',
+          perPage: 24,
+          totalCount: 0
+        },
+        items: []
+      };
     }
     
     throw error;
@@ -186,37 +233,47 @@ async function searchMovieBox(query) {
  */
 async function searchMovieBoxFull(query, getInfo) {
   try {
-    // First, get the basic search results with IDs
-      const basicResults = await searchMovieBox(query);
+    // First, get the basic search results with IDs and pagination
+    const searchResult = await searchMovieBox(query);
 
     // If no getInfo function provided or no results, return basic results
-    if (!getInfo || typeof getInfo !== 'function' || basicResults.length === 0) {
-      return basicResults;
+    if (!getInfo || typeof getInfo !== 'function' || !searchResult.items || searchResult.items.length === 0) {
+      return searchResult;
     }
 
-    // basicResults might be an array of numeric ID strings (['5034...', ...])
-    // or an array of objects { id, title, slug, url }
-    const ids = basicResults.map((r) => (typeof r === 'string' ? r : r.id));
-
-    // Fetch full metadata for each ID in parallel using getInfo
-    const fullResults = await Promise.all(
-      ids.map(async (id, idx) => {
+    // Fetch full metadata for each item in parallel using getInfo
+    const enrichedItems = await Promise.all(
+      searchResult.items.map(async (item) => {
         try {
-          const metadata = await getInfo(id);
-          // Merge with any basic result info if provided
-          const basic = basicResults[idx] && typeof basicResults[idx] === 'object' ? basicResults[idx] : { id };
-          return {
-            ...basic,
-            ...metadata
-          };
+          const metadata = await getInfo(item.subjectId);
+          // Merge metadata from getInfo into the item
+          // getInfo returns full result from /info/{id}
+          if (metadata && metadata.results && metadata.results.subject) {
+            const subject = metadata.results.subject;
+            return {
+              ...item,
+              description: subject.description || item.description,
+              releaseDate: subject.releaseDate || item.releaseDate,
+              duration: subject.duration || item.duration,
+              genre: subject.genre || item.genre,
+              cover: subject.cover || item.cover,
+              countryName: subject.countryName || item.countryName,
+              imdbRatingValue: subject.imdbRatingValue || item.imdbRatingValue
+            };
+          }
+          return item;
         } catch (err) {
-          console.error(`[MovieBox] Error fetching metadata for ID ${id}:`, err.message);
-          return { id };
+          console.error(`[MovieBox] Error fetching metadata for ID ${item.subjectId}:`, err.message);
+          return item; // Return basic item if enrichment fails
         }
       })
     );
 
-    return fullResults;
+    // Return enriched results with same pagination structure
+    return {
+      pager: searchResult.pager,
+      items: enrichedItems
+    };
   } catch (error) {
     console.error(`[MovieBox] Full search error for query "${query}":`, error.message);
     throw error;
