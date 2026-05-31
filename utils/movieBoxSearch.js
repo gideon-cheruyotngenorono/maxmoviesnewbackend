@@ -324,6 +324,58 @@ async function searchMovieBox(query) {
 }
 
 /**
+ * Enrich search results with real metadata from the Movie API
+ * Uses numeric IDs from search to fetch full metadata including real thumbnails
+ * 
+ * @param {Array} searchItems - Items from searchMovieBox
+ * @param {Function} getInfo - Optional function to fetch full metadata: async (id) => metadata
+ * @returns {Promise<Array>} Enriched items with real thumbnails and metadata
+ */
+async function enrichSearchResults(searchItems, getInfo) {
+  if (!getInfo || typeof getInfo !== 'function' || !searchItems || searchItems.length === 0) {
+    return searchItems;
+  }
+
+  // Fetch full metadata for each item in parallel using getInfo
+  const enrichedItems = await Promise.all(
+    searchItems.map(async (item) => {
+      try {
+        const metadata = await getInfo(item.subjectId);
+        
+        // The API response structure includes results.subject
+        if (metadata && metadata.results && metadata.results.subject) {
+          const subject = metadata.results.subject;
+          
+          // Use real thumbnail from API if available, otherwise use our extracted cover
+          const apiCover = subject.cover;
+          const apiThumb = subject.thumb;
+          
+          return {
+            ...item,
+            description: subject.description || item.description,
+            releaseDate: subject.releaseDate || item.releaseDate,
+            duration: subject.duration || item.duration,
+            genre: subject.genre || item.genre,
+            // Prefer API's cover/thumb over our scraped version
+            cover: apiCover || item.cover,
+            thumbnail: apiThumb || apiCover?.url || item.thumbnail,
+            countryName: subject.countryName || item.countryName,
+            imdbRatingValue: subject.imdbRatingValue || item.imdbRatingValue
+          };
+        }
+        return item;
+      } catch (err) {
+        console.warn(`[MovieBox] Error fetching metadata for ID ${item.subjectId}:`, err.message);
+        // Return item with basic info if enrichment fails
+        return item;
+      }
+    })
+  );
+
+  return enrichedItems;
+}
+
+/**
  * Search Movie Box and optionally get full metadata for each result
  * 
  * This function first searches Movie Box to get IDs, then optionally
@@ -339,43 +391,21 @@ async function searchMovieBoxFull(query, getInfo) {
     const searchResult = await searchMovieBox(query);
 
     // If no getInfo function provided or no results, return basic results
-    if (!getInfo || typeof getInfo !== 'function' || !searchResult.items || searchResult.items.length === 0) {
+    if (!searchResult.items || searchResult.items.length === 0) {
       return searchResult;
     }
 
-    // Fetch full metadata for each item in parallel using getInfo
-    const enrichedItems = await Promise.all(
-      searchResult.items.map(async (item) => {
-        try {
-          const metadata = await getInfo(item.subjectId);
-          // Merge metadata from getInfo into the item
-          // getInfo returns full result from /info/{id}
-          if (metadata && metadata.results && metadata.results.subject) {
-            const subject = metadata.results.subject;
-            return {
-              ...item,
-              description: subject.description || item.description,
-              releaseDate: subject.releaseDate || item.releaseDate,
-              duration: subject.duration || item.duration,
-              genre: subject.genre || item.genre,
-              cover: subject.cover || item.cover,
-              countryName: subject.countryName || item.countryName,
-              imdbRatingValue: subject.imdbRatingValue || item.imdbRatingValue
-            };
-          }
-          return item;
-        } catch (err) {
-          console.error(`[MovieBox] Error fetching metadata for ID ${item.subjectId}:`, err.message);
-          return item; // Return basic item if enrichment fails
-        }
-      })
-    );
+    // Enrich with metadata if getInfo is provided
+    if (getInfo && typeof getInfo === 'function') {
+      const enrichedItems = await enrichSearchResults(searchResult.items, getInfo);
+      return {
+        pager: searchResult.pager,
+        items: enrichedItems
+      };
+    }
 
-    // Return enriched results with same pagination structure
-    return {
-      pager: searchResult.pager,
-      items: enrichedItems
-    };
+    // Return basic results if no enrichment function
+    return searchResult;
   } catch (error) {
     console.error(`[MovieBox] Full search error for query "${query}":`, error.message);
     throw error;

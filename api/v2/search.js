@@ -25,28 +25,19 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Check if full metadata mode is requested
-    const full = req.query.full === 'true' || req.query.full === '1';
+    // Always fetch full metadata with real thumbnails from API
+    // This ensures consistent behavior and proper thumbnails for all search results
+    const getInfo = async (id) => {
+      try {
+        const metadata = await apiClient.get(`/info/${id}`);
+        return metadata;
+      } catch (err) {
+        console.warn(`[API] Error fetching info for ID ${id}:`, err.message);
+        return { id };
+      }
+    };
 
-    let results;
-
-    if (full) {
-      // Get IDs from Movie Box, then fetch full metadata
-      const getInfo = async (id) => {
-        try {
-          const metadata = await apiClient.get(`/info/${id}`);
-          return metadata;
-        } catch (err) {
-          console.error(`[API] Error fetching info for ID ${id}:`, err.message);
-          return { id };
-        }
-      };
-
-      results = await searchMovieBoxFull(query, getInfo);
-    } else {
-      // Only get IDs from Movie Box
-      results = await searchMovieBox(query);
-    }
+    const results = await searchMovieBoxFull(query, getInfo);
 
     return res.status(200).json({
       status: 200,

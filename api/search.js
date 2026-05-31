@@ -29,28 +29,21 @@ module.exports = async (req, res) => {
     }
 
     // Step 1: Search Movie Box to discover content IDs
-    let results;
+    // Create a wrapper for getInfo that uses the existing apiClient
+    const getInfo = async (id) => {
+      try {
+        const metadata = await apiClient.get(`/info/${id}`);
+        return metadata;
+      } catch (err) {
+        console.warn(`[API] Error fetching info for ID ${id}:`, err.message);
+        // Return minimal data if full info fetch fails
+        return { id };
+      }
+    };
 
-    // Check if full metadata mode is requested
-    if (full === 'true' || full === '1') {
-      // Step 2 (Full mode): Get IDs from Movie Box, then fetch full metadata
-      // Create a wrapper for getInfo that uses the existing apiClient
-      const getInfo = async (id) => {
-        try {
-          const metadata = await apiClient.get(`/info/${id}`);
-          return metadata;
-        } catch (err) {
-          console.error(`[API] Error fetching info for ID ${id}:`, err.message);
-          // Return minimal data if full info fetch fails
-          return { id };
-        }
-      };
-
-      results = await searchMovieBoxFull(searchQuery, getInfo);
-    } else {
-      // Step 1 (Basic mode): Only get IDs from Movie Box
-      results = await searchMovieBox(searchQuery);
-    }
+    // Always enrich search results with real metadata from the API
+    // This ensures we get real thumbnails instead of Movie Box placeholders
+    const results = await searchMovieBoxFull(searchQuery, getInfo);
 
     // Step 3: Return the clean JSON response
     return res.status(200).json({
