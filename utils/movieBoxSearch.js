@@ -68,6 +68,7 @@ async function searchMovieBox(query) {
 
     // Look for links that contain /detail/ in their href
     let detailLinksFound = 0;
+    const detailLinks = [];
     
     $('a').each((index, element) => {
       try {
@@ -83,8 +84,7 @@ async function searchMovieBox(query) {
           const slugMatch = href.match(/\/detail\/([^/?]+)/);
           
           if (!slugMatch || !slugMatch[1]) {
-            console.log(`[MovieBox] Detail link found but no slug: ${href}`);
-            return; // Skip if slug not found
+            return;
           }
 
           const slug = slugMatch[1];
@@ -95,44 +95,14 @@ async function searchMovieBox(query) {
           }
 
           seenSlugs.add(slug);
+          
+          // Store full href for later ID extraction
+          detailLinks.push({
+            slug: slug,
+            href: href,
+            linkText: $(element).text().trim()
+          });
 
-          // Step 6: Extract metadata
-          const result = {
-            // Use slug as identifier since Movie Box doesn't expose numeric ID in HTML
-            // The slug contains a unique code (e.g., etzlmHMeSZ5)
-            id: slug,
-            slug: slug
-          };
-
-          // Try to extract title from link text and clean it
-          let linkText = $(element).text().trim();
-          if (linkText && linkText.length > 0 && linkText.length < 500) {
-            // Clean up title: remove rating numbers and "Watch now" text
-            // Example: "8.0Chicago Fire S14Watch now" -> "Chicago Fire S14"
-            linkText = linkText
-              .replace(/^\d+\.?\d*/, '')                    // Remove leading rating
-              .replace(/watch\s*now\s*$/i, '')              // Remove "watch now" at end
-              .replace(/^\s+|\s+$/g, '')                    // Trim whitespace
-              .replace(/\s{2,}/g, ' ');                      // Remove extra spaces
-            
-            if (linkText) {
-              result.title = linkText;
-            }
-          }
-
-          // Try to extract poster from nearby image
-          const posterAttr = $(element).data('poster') || 
-                             $(element).find('img').attr('src') ||
-                             $(element).find('img').attr('data-src');
-          if (posterAttr) {
-            result.poster = posterAttr;
-          }
-
-          // Build full URL for reference
-          result.url = `https://movie-box.co${href}`;
-
-          results.push(result);
-          console.log(`[MovieBox] Extracted result: Slug=${slug}, Title=${result.title || 'N/A'}`);
         }
       } catch (err) {
         // Log but continue processing other links
@@ -141,14 +111,49 @@ async function searchMovieBox(query) {
     });
 
     console.log(`[MovieBox] Detail links scanned: ${detailLinksFound}`);
-    console.log(`[MovieBox] Found ${results.length} unique results for query: "${query}"`);
+    console.log(`[MovieBox] Found ${detailLinks.length} unique links for query: "${query}"`);
+    console.log(`[MovieBox] Fetching numeric IDs from detail pages...`);
 
-    // If no results found, log debugging info
-    if (results.length === 0) {
-      console.log(`[MovieBox] No results found. Checking page structure...`);
-      const allLinks = $('a').length;
-      console.log(`[MovieBox] Total links in page: ${allLinks}`);
+    // Step 7: Fetch each detail page to extract the numeric ID
+    for (const link of detailLinks) {
+      try {
+        const detailResponse = await movieBoxClient.get(`/detail/${link.slug}`);
+        const detailHtml = detailResponse.data;
+        
+        // Parse detail page with cheerio
+        const detailPage = cheerio.load(detailHtml);
+        
+        // Look for the numeric ID in script tags (usually script 6)
+        // The ID appears as large numbers in the NUXT data
+        let numericId = null;
+        
+        detailPage('script').each((i, el) => {
+          const scriptContent = detailPage(el).html();
+          if (scriptContent && !numericId) {
+            // Look for a 15+ digit number (the first one is usually the content ID)
+            const idMatch = scriptContent.match(/(\d{15,})/);
+            if (idMatch) {
+              numericId = idMatch[1];
+            }
+          }
+        });
+        
+        if (numericId) {
+          // For the basic search we only return numeric IDs (as strings)
+          results.push(String(numericId));
+          // Log a concise extraction message
+          let prettyTitle = link.linkText ? link.linkText.replace(/^\d+\.?\d*/, '').replace(/watch\s*now\s*$/i, '').trim() : 'N/A';
+          console.log(`[MovieBox] Extracted numeric ID=${numericId}, Title=${prettyTitle}`);
+        } else {
+          console.log(`[MovieBox] Warning: Could not extract numeric ID from detail page: /detail/${link.slug}`);
+        }
+      } catch (detailErr) {
+        console.warn(`[MovieBox] Error fetching detail page for ${link.slug}:`, detailErr.message);
+        // Continue with next link
+      }
     }
+
+    console.log(`[MovieBox] Successfully extracted ${results.length} results for query: "${query}"`);
 
     return results;
   } catch (error) {
@@ -182,27 +187,31 @@ async function searchMovieBox(query) {
 async function searchMovieBoxFull(query, getInfo) {
   try {
     // First, get the basic search results with IDs
-    const basicResults = await searchMovieBox(query);
+      const basicResults = await searchMovieBox(query);
 
     // If no getInfo function provided or no results, return basic results
     if (!getInfo || typeof getInfo !== 'function' || basicResults.length === 0) {
       return basicResults;
     }
 
-    // Fetch full metadata for each result in parallel
+    // basicResults might be an array of numeric ID strings (['5034...', ...])
+    // or an array of objects { id, title, slug, url }
+    const ids = basicResults.map((r) => (typeof r === 'string' ? r : r.id));
+
+    // Fetch full metadata for each ID in parallel using getInfo
     const fullResults = await Promise.all(
-      basicResults.map(async (result) => {
+      ids.map(async (id, idx) => {
         try {
-          const metadata = await getInfo(result.id);
-          // Merge basic result with full metadata
+          const metadata = await getInfo(id);
+          // Merge with any basic result info if provided
+          const basic = basicResults[idx] && typeof basicResults[idx] === 'object' ? basicResults[idx] : { id };
           return {
-            ...result,
+            ...basic,
             ...metadata
           };
         } catch (err) {
-          // If metadata fetch fails, return just the basic result
-          console.error(`[MovieBox] Error fetching metadata for ID ${result.id}:`, err.message);
-          return result;
+          console.error(`[MovieBox] Error fetching metadata for ID ${id}:`, err.message);
+          return { id };
         }
       })
     );
