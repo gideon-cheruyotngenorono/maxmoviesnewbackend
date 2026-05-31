@@ -30,6 +30,44 @@ const movieBoxClient = axios.create({
 });
 
 /**
+ * Detect content type from title and other metadata
+ * @param {string} title - Content title
+ * @param {string} genre - Content genre
+ * @returns {number} subjectType: 1=Movie, 2=Series, 3=Music, 7=Short-Series
+ */
+function detectContentType(title = '', genre = '') {
+  const lowerTitle = (title || '').toLowerCase();
+  const lowerGenre = (genre || '').toLowerCase();
+  const combined = lowerTitle + ' ' + lowerGenre;
+  
+  // Series indicators (check FIRST because series take precedence)
+  // Look for season/episode patterns or series-specific keywords
+  const seriesPatterns = [
+    /\bs\d+/i,           // S01, S1, S14, etc.
+    /\be\d+/i,           // E01, E1, E14, etc.
+    /season\s*\d+/i,     // Season 1, Season 01, etc.
+    /episode\s*\d+/i,    // Episode 1, Episode 01, etc.
+    /s\d+\s*e\d+/i,      // S01E01, S1E1, etc.
+    /series/i,           // the word "series"
+    /\bshow\b/i,         // the word "show"
+    /\btv\b/i,           // the word "tv"
+  ];
+  
+  if (seriesPatterns.some(pattern => pattern.test(combined))) {
+    return 2; // Series
+  }
+  
+  // Music indicators
+  const musicKeywords = ['song', 'music', 'audio', 'track', 'album', 'single', 'remix', 'ft.', 'feat.', 'arbantone', 'russ millions', 'bongo', 'hiphop', 'classical', 'reggaetone', 'rnb', 'gengetone', 'afro beats', 'pop', 'gospel', 'instrumental'];
+  if (musicKeywords.some(keyword => combined.includes(keyword))) {
+    return 3; // Music
+  }
+  
+  // Default to Movie
+  return 1;
+}
+
+/**
  * Search Movie Box for a query and extract content IDs
  * 
  * @param {string} query - Search query (e.g., "chicago fire")
@@ -123,7 +161,7 @@ async function searchMovieBox(query) {
     console.log(`[MovieBox] Found ${detailLinks.length} unique links for query: "${query}"`);
     console.log(`[MovieBox] Fetching numeric IDs from detail pages...`);
 
-    // Step 7: Fetch each detail page to extract the numeric ID
+    // Step 7: Fetch each detail page to extract the numeric ID and cover image
     for (const link of detailLinks) {
       try {
         const detailResponse = await movieBoxClient.get(`/detail/${link.slug}`);
@@ -135,44 +173,108 @@ async function searchMovieBox(query) {
         // Look for the numeric ID in script tags (usually script 6)
         // The ID appears as large numbers in the NUXT data
         let numericId = null;
+        let coverUrl = '';
+        let genre = '';
         
         detailPage('script').each((i, el) => {
           const scriptContent = detailPage(el).html();
-          if (scriptContent && !numericId) {
+          if (scriptContent) {
             // Look for a 15+ digit number (the first one is usually the content ID)
-            const idMatch = scriptContent.match(/(\d{15,})/);
-            if (idMatch) {
-              numericId = idMatch[1];
+            if (!numericId) {
+              const idMatch = scriptContent.match(/(\d{15,})/);
+              if (idMatch) {
+                numericId = idMatch[1];
+              }
+            }
+            
+            // Extract genre from script data if present
+            if (!genre && scriptContent.includes('genre')) {
+              const genreMatch = scriptContent.match(/"genre"\s*:\s*"([^"]+)"/);
+              if (genreMatch) {
+                genre = genreMatch[1];
+              }
             }
           }
         });
+        
+        // Extract cover image from img tags or meta tags
+        // Look for poster/cover images in the page
+        detailPage('img').each((i, el) => {
+          const src = detailPage(el).attr('src');
+          const alt = detailPage(el).attr('alt');
+          const classes = detailPage(el).attr('class') || '';
+          
+          // Try to find the main poster image
+          if (!coverUrl && src) {
+            // Common patterns for poster images
+            if (classes.includes('poster') || classes.includes('cover') || 
+                alt?.toLowerCase().includes('poster') || alt?.toLowerCase().includes('cover') ||
+                src.includes('poster') || src.includes('cover') || src.includes('image')) {
+              coverUrl = src;
+            }
+          }
+        });
+        
+        // If no cover found in img tags, try to extract from og:image meta tag
+        if (!coverUrl) {
+          const ogImage = detailPage('meta[property="og:image"]').attr('content');
+          if (ogImage) {
+            coverUrl = ogImage;
+          }
+        }
+        
+        // If still no cover, try common Movie Box image patterns
+        if (!coverUrl) {
+          detailPage('img[loading="lazy"]').each((i, el) => {
+            const src = detailPage(el).attr('src');
+            if (src && !coverUrl && src.includes('/')) {
+              coverUrl = src;
+              return false; // break
+            }
+          });
+        }
         
         if (numericId) {
           // Extract and clean title from link text
           let title = link.linkText ? link.linkText.replace(/^\d+\.?\d*/, '').replace(/watch\s*now\s*$/i, '').trim() : 'Unknown';
           
+          // Detect content type
+          const subjectType = detectContentType(title, genre);
+          
+          // Normalize cover URL to absolute if needed
+          let absoluteCoverUrl = coverUrl;
+          if (coverUrl && !coverUrl.startsWith('http')) {
+            if (coverUrl.startsWith('/')) {
+              absoluteCoverUrl = 'https://movie-box.co' + coverUrl;
+            } else {
+              absoluteCoverUrl = 'https://movie-box.co/' + coverUrl;
+            }
+          }
+          
           // Create item object matching original format
           const item = {
             subjectId: numericId,
-            subjectType: 1, // 1 = Movie/Series
+            subjectType: subjectType, // 1=Movie, 2=Series, 3=Music, 7=Short-Series
             title: title,
             description: '',
             releaseDate: '',
             duration: 0,
-            genre: '',
+            genre: genre,
             cover: {
-              url: '',
-              width: 0,
-              height: 0
+              url: absoluteCoverUrl,
+              width: 300,
+              height: 450
             },
             countryName: '',
             imdbRatingValue: '0',
             hasResource: true,
-            detailPath: link.slug
+            detailPath: link.slug,
+            thumbnail: absoluteCoverUrl // For alternative property name used by frontend
           };
           
           items.push(item);
-          console.log(`[MovieBox] Extracted: ID=${numericId}, Title=${title}`);
+          const contentTypeLabel = {1: 'Movie', 2: 'Series', 3: 'Music', 7: 'Short'}[subjectType] || 'Unknown';
+          console.log(`[MovieBox] Extracted: ID=${numericId}, Title=${title}, Type=${contentTypeLabel}, Cover=${absoluteCoverUrl ? '✓' : '✗'}`);
         } else {
           console.log(`[MovieBox] Warning: Could not extract numeric ID from detail page: /detail/${link.slug}`);
         }
