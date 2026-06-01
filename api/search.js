@@ -30,15 +30,10 @@ module.exports = async (req, res) => {
 
     // Step 1: Search Movie Box to discover content IDs
     // Create a wrapper for getInfo that uses the existing apiClient
+    // Throws on error so items without valid data are filtered out
     const getInfo = async (id) => {
-      try {
-        const metadata = await apiClient.get(`/info/${id}`);
-        return metadata;
-      } catch (err) {
-        console.warn(`[API] Error fetching info for ID ${id}:`, err.message);
-        // Return minimal data if full info fetch fails
-        return { id };
-      }
+      const metadata = await apiClient.get(`/info/${id}`);
+      return metadata;
     };
 
     // Always enrich search results with real metadata from the API

@@ -346,7 +346,12 @@ async function enrichSearchResults(searchItems, getInfo) {
         if (metadata && metadata.results && metadata.results.subject) {
           const subject = metadata.results.subject;
           
-          // Use real thumbnail from API if available, otherwise use our extracted cover
+          // Skip items without real cover/thumbnail from API
+          if (!subject.cover && !subject.thumb) {
+            return null; // Mark for filtering
+          }
+          
+          // Use real thumbnail from API if available
           const apiCover = subject.cover;
           const apiThumb = subject.thumb;
           
@@ -356,23 +361,24 @@ async function enrichSearchResults(searchItems, getInfo) {
             releaseDate: subject.releaseDate || item.releaseDate,
             duration: subject.duration || item.duration,
             genre: subject.genre || item.genre,
-            // Prefer API's cover/thumb over our scraped version
-            cover: apiCover || item.cover,
-            thumbnail: apiThumb || apiCover?.url || item.thumbnail,
+            cover: apiCover,
+            thumbnail: apiThumb || apiCover?.url,
             countryName: subject.countryName || item.countryName,
             imdbRatingValue: subject.imdbRatingValue || item.imdbRatingValue
           };
         }
-        return item;
+        // No valid subject data - skip this item
+        return null;
       } catch (err) {
-        console.warn(`[MovieBox] Error fetching metadata for ID ${item.subjectId}:`, err.message);
-        // Return item with basic info if enrichment fails
-        return item;
+        console.warn(`[MovieBox] Skipping ID ${item.subjectId} - API error: ${err.message}`);
+        // Skip on error instead of returning partial data
+        return null;
       }
     })
   );
 
-  return enrichedItems;
+  // Filter out null entries (items that couldn't be enriched with real data)
+  return enrichedItems.filter(item => item !== null);
 }
 
 /**

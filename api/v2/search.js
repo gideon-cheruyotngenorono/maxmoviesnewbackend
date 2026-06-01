@@ -26,15 +26,10 @@ module.exports = async (req, res) => {
     }
 
     // Always fetch full metadata with real thumbnails from API
-    // This ensures consistent behavior and proper thumbnails for all search results
+    // Throws on error so items without valid data are filtered out
     const getInfo = async (id) => {
-      try {
-        const metadata = await apiClient.get(`/info/${id}`);
-        return metadata;
-      } catch (err) {
-        console.warn(`[API] Error fetching info for ID ${id}:`, err.message);
-        return { id };
-      }
+      const metadata = await apiClient.get(`/info/${id}`);
+      return metadata;
     };
 
     const results = await searchMovieBoxFull(query, getInfo);
