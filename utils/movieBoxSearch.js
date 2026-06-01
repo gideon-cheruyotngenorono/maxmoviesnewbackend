@@ -346,14 +346,14 @@ async function enrichSearchResults(searchItems, getInfo) {
         if (metadata && metadata.results && metadata.results.subject) {
           const subject = metadata.results.subject;
           
-          // Skip items without real cover/thumbnail from API
-          if (!subject.cover && !subject.thumb) {
-            return null; // Mark for filtering
-          }
-          
-          // Use real thumbnail from API if available
+          // Use API data if available, otherwise return null to filter
           const apiCover = subject.cover;
           const apiThumb = subject.thumb;
+          
+          // Accept items that have at least a cover OR meaningful data
+          if (!apiCover && !apiThumb && !subject.description) {
+            return null; // Skip only if completely empty
+          }
           
           return {
             ...item,
@@ -361,8 +361,8 @@ async function enrichSearchResults(searchItems, getInfo) {
             releaseDate: subject.releaseDate || item.releaseDate,
             duration: subject.duration || item.duration,
             genre: subject.genre || item.genre,
-            cover: apiCover,
-            thumbnail: apiThumb || apiCover?.url,
+            cover: apiCover || item.cover, // Fall back to Movie Box cover if needed
+            thumbnail: apiThumb || apiCover?.url || item.thumbnail,
             countryName: subject.countryName || item.countryName,
             imdbRatingValue: subject.imdbRatingValue || item.imdbRatingValue
           };
